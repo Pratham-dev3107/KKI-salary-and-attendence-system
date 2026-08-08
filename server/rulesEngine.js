@@ -229,48 +229,33 @@ function applyWeeklyOffForfeiture(dailyRecords, settings = {}) {
   const weeklyOffForfeiture = parseInt(settings.weekly_off_forfeiture_threshold || 3, 10);
   const monthlyAbsentForfeiture = parseInt(settings.monthly_absent_forfeiture_threshold || 4, 10);
 
-  // Count total monthly absents (excluding forfeited Sundays)
+  // Count total monthly absents
   let totalMonthlyAbsents = 0;
   dailyRecords.forEach(r => {
     if (r.status === 'Absent') totalMonthlyAbsents++;
   });
 
-  // RULE: If 4+ absents in month, forfeit ALL non-OT Sundays
-  const forfeitAllSundays = totalMonthlyAbsents >= monthlyAbsentForfeiture;
-
-  // Group records by calendar week (Monday to Sunday)
+  // Step 1: Evaluate Weekly Forfeiture rules for each Sunday
   for (let i = 0; i < dailyRecords.length; i++) {
     const rec = dailyRecords[i];
-
-    // Check if this record is Sunday (or designated weekly off day)
     const isWeeklyOff = rec.weekday && rec.weekday.toLowerCase().startsWith(weeklyOffDay.toLowerCase().slice(0, 3));
 
     if (isWeeklyOff && rec.status.includes('Weekly Off')) {
       // Don't forfeit Sunday if worker worked OT that day
-      if (rec.status === 'Weekly Off (Worked OT)') {
-        continue; // Keep as paid
-      }
-
-      // RULE 1: Monthly forfeiture (4+ absents → all Sundays forfeited)
-      if (forfeitAllSundays) {
-        rec.status = 'Weekly Off (Forfeited)';
+      if (rec.status === 'Weekly Off (Worked OT)' || (rec.sundayOtHours && rec.sundayOtHours > 0)) {
+        rec.status = 'Weekly Off (Worked OT)';
         continue;
       }
 
-      // RULE 2: Weekly forfeiture (look back at Mon-Sat for absents)
+      // Check weekly absent count in preceding Mon-Sat stretch
       let weeklyAbsentCount = 0;
+      let weeklyOffsInWeek = 0;
       for (let j = Math.max(0, i - 6); j < i; j++) {
         const prevRec = dailyRecords[j];
         if (prevRec.status === 'Absent') {
           weeklyAbsentCount++;
-        }
-      }
-
-      // RULE 3: 3+ weekly offs in same week → forfeit Sunday
-      let weeklyOffsInWeek = 0;
-      for (let j = Math.max(0, i - 6); j < i; j++) {
-        const prevRec = dailyRecords[j];
-        if (prevRec.status.includes('Weekly Off') || prevRec.status === 'Absent') {
+          weeklyOffsInWeek++;
+        } else if (prevRec.status.includes('Weekly Off')) {
           weeklyOffsInWeek++;
         }
       }
@@ -279,6 +264,23 @@ function applyWeeklyOffForfeiture(dailyRecords, settings = {}) {
         rec.status = 'Weekly Off (Forfeited)';
       } else {
         rec.status = 'Weekly Off (Paid)';
+      }
+    }
+  }
+
+  // Step 2: Monthly Forfeiture Rule (If 4+ absents in month, forfeit EXACTLY 1 non-OT Sunday)
+  if (totalMonthlyAbsents >= monthlyAbsentForfeiture) {
+    let forfeitedCount = dailyRecords.filter(r => r.status === 'Weekly Off (Forfeited)').length;
+
+    // If no Sunday is forfeited yet by weekly rule, forfeit the FIRST available non-OT paid Sunday
+    if (forfeitedCount === 0) {
+      for (let i = 0; i < dailyRecords.length; i++) {
+        const rec = dailyRecords[i];
+        const isWeeklyOff = rec.weekday && rec.weekday.toLowerCase().startsWith(weeklyOffDay.toLowerCase().slice(0, 3));
+        if (isWeeklyOff && rec.status === 'Weekly Off (Paid)') {
+          rec.status = 'Weekly Off (Forfeited)';
+          break; // Forfeit ONLY EXACTLY 1 Sunday!
+        }
       }
     }
   }
