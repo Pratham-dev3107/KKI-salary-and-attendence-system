@@ -1,0 +1,219 @@
+const { createClient } = require('@libsql/client');
+const path = require('path');
+const fs = require('fs');
+
+const dataDir = path.join(__dirname, '../data');
+if (!fs.existsSync(dataDir)) {
+  fs.mkdirSync(dataDir, { recursive: true });
+}
+
+const dbUrl = process.env.TURSO_DATABASE_URL || `file:${path.join(dataDir, 'attendance.db')}`;
+const authToken = process.env.TURSO_AUTH_TOKEN || undefined;
+
+const db = createClient({
+  url: dbUrl,
+  authToken,
+});
+
+async function execute(sql, args = []) {
+  try {
+    return await db.execute({ sql, args });
+  } catch (err) {
+    console.error('DB Execute Error:', err.message, 'SQL:', sql);
+    throw err;
+  }
+}
+
+async function batch(statements) {
+  try {
+    return await db.batch(statements, 'write');
+  } catch (err) {
+    console.error('DB Batch Error:', err.message);
+    throw err;
+  }
+}
+
+// Initialize SQLite/Turso tables
+async function initDatabase() {
+  const schemaQueries = [
+    // Admin settings table
+    `CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      description TEXT
+    );`,
+
+    // Workers table
+    `CREATE TABLE IF NOT EXISTS workers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      staff_no TEXT UNIQUE NOT NULL,
+      staff_name TEXT NOT NULL,
+      department TEXT DEFAULT 'WORKER',
+      monthly_salary REAL DEFAULT 15000,
+      housing_allowance REAL DEFAULT 0,
+      food_allowance REAL DEFAULT 0,
+      other_allowance REAL DEFAULT 0,
+      salary_type TEXT DEFAULT 'monthly',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );`,
+
+    // Raw punches table
+    `CREATE TABLE IF NOT EXISTS raw_punches (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      staff_no TEXT NOT NULL,
+      date TEXT NOT NULL, -- YYYY-MM-DD
+      weekday TEXT,
+      swipe_record TEXT, -- e.g. "07:54 12:33 14:24 18:36"
+      machine_work_time TEXT,
+      batch_id TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(staff_no, date)
+    );`,
+
+    // Recomputed daily attendance table
+    `CREATE TABLE IF NOT EXISTS daily_attendance (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      staff_no TEXT NOT NULL,
+      date TEXT NOT NULL, -- YYYY-MM-DD
+      weekday TEXT,
+      raw_swipes TEXT,
+      effective_in TEXT,
+      effective_out TEXT,
+      regular_hours REAL DEFAULT 0,
+      ot_hours REAL DEFAULT 0,
+      total_hours REAL DEFAULT 0,
+      late_minutes INTEGER DEFAULT 0,
+      status TEXT NOT NULL, -- 'Present (Full)', 'Present (Short)', 'Absent', 'Weekly Off (Paid)', 'Weekly Off (Forfeited)', 'Incomplete'
+      is_manual_override INTEGER DEFAULT 0,
+      override_reason TEXT,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(staff_no, date)
+    );`,
+
+    // Advances ledger table
+    `CREATE TABLE IF NOT EXISTS advances (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      staff_no TEXT NOT NULL,
+      date TEXT NOT NULL,
+      amount REAL NOT NULL,
+      note TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );`,
+
+    // Audit logs table
+    `CREATE TABLE IF NOT EXISTS audit_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      staff_no TEXT NOT NULL,
+      date TEXT NOT NULL,
+      field_changed TEXT NOT NULL,
+      old_value TEXT,
+      new_value TEXT,
+      edited_by TEXT DEFAULT 'Admin',
+      reason TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );`,
+
+    // Rule Profiles table
+    `CREATE TABLE IF NOT EXISTS rule_profiles (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      profile_name TEXT UNIQUE NOT NULL,
+      is_default INTEGER DEFAULT 0,
+      shift_start TEXT DEFAULT '08:30',
+      shift_end TEXT DEFAULT '16:30',
+      grace_slab_minutes INTEGER DEFAULT 30,
+      ot_multiplier REAL DEFAULT 1.5,
+      ot_rounding TEXT DEFAULT 'minutes',
+      short_hours_threshold REAL DEFAULT 4.0,
+      weekly_off_day TEXT DEFAULT 'Sun',
+      forfeiture_absent_threshold INTEGER DEFAULT 2,
+      standard_month_days TEXT DEFAULT '26',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );`,
+
+    // Custom Rules table (timing-based restrictions)
+    `CREATE TABLE IF NOT EXISTS custom_rules (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      rule_name TEXT NOT NULL,
+      rule_type TEXT NOT NULL, -- 'midday_exit', 'late_penalty', 'ot_rule', 'salary_rule'
+      start_time TEXT DEFAULT '',
+      end_time TEXT DEFAULT '',
+      threshold_mins INTEGER DEFAULT 0,
+      deduction_mins INTEGER DEFAULT 0,
+      deduction_amount REAL DEFAULT 0,
+      is_active INTEGER DEFAULT 1,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );`,
+
+    // Custom Salary Rules table (bonus/deduction/OT modifier rules — manual & AI-generated)
+    `CREATE TABLE IF NOT EXISTS custom_salary_rules (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      rule_name TEXT NOT NULL,
+      rule_type TEXT NOT NULL DEFAULT 'bonus',
+      condition_type TEXT DEFAULT 'always',
+      condition_value TEXT DEFAULT '0',
+      action_type TEXT DEFAULT 'add_fixed',
+      action_value REAL DEFAULT 0,
+      applies_to_day TEXT DEFAULT 'all',
+      description TEXT,
+      source TEXT DEFAULT 'manual',
+      ai_original_prompt TEXT,
+      is_active INTEGER DEFAULT 1,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );`
+  ];
+
+  for (const sql of schemaQueries) {
+    await execute(sql);
+  }
+
+  // Migrations for existing database instances
+  try { await execute(`ALTER TABLE workers ADD COLUMN housing_allowance REAL DEFAULT 0`); } catch (e) {}
+  try { await execute(`ALTER TABLE workers ADD COLUMN food_allowance REAL DEFAULT 0`); } catch (e) {}
+  try { await execute(`ALTER TABLE workers ADD COLUMN other_allowance REAL DEFAULT 0`); } catch (e) {}
+  try { await execute(`ALTER TABLE daily_attendance ADD COLUMN sunday_ot_hours REAL DEFAULT 0`); } catch (e) {}
+
+  // Insert default settings if empty
+  const defaultSettings = [
+    ['shift_start', '08:30', 'Standard shift start time (HH:MM)'],
+    ['shift_end', '16:30', 'Standard shift end time (HH:MM)'],
+    ['grace_slab_minutes', '30', 'Late arrival grace slab size in minutes'],
+    ['ot_multiplier', '1.5', 'Overtime pay multiplier'],
+    ['ot_rounding', 'minutes', 'OT rounding mode: "minutes" or "30min_block"'],
+    ['short_hours_threshold', '4.0', 'Threshold hours below which day is short hours'],
+    ['weekly_off_day', 'Sun', 'Default paid weekly off day (Sun/Sat/etc)'],
+    ['forfeiture_absent_threshold', '2', 'Number of absent days in Mon-Sat stretch to forfeit Sunday'],
+    ['weekly_off_forfeiture_threshold', '3', 'Number of weekly offs in same week to forfeit Sunday'],
+    ['monthly_absent_forfeiture_threshold', '4', 'Total monthly absents to forfeit ALL Sundays (except OT worked)'],
+    ['standard_month_days', '26', 'Standard days in month for per-day rate calculation (26/30/calendar)'],
+    ['max_ot_hours', '0', 'Maximum OT hours cap per day (0 = Unlimited)'],
+    ['lunch_deduction_mins', '0', 'Automatic lunch/break deduction in minutes'],
+    ['late_penalty_threshold_mins', '120', 'Late arrival cutoff in minutes for half-day penalty'],
+    ['sunday_ot_multiplier', '2.0', 'Overtime multiplier for Sunday work']
+  ];
+
+  for (const [key, value, desc] of defaultSettings) {
+    await execute(
+      `INSERT INTO settings (key, value, description) VALUES (?, ?, ?) ON CONFLICT(key) DO NOTHING;`,
+      [key, value, desc]
+    );
+  }
+
+  // Insert default Rule Profile if rule_profiles table is empty
+  const profilesCountRes = await execute(`SELECT COUNT(*) as cnt FROM rule_profiles`);
+  if (profilesCountRes.rows[0].cnt === 0) {
+    await execute(
+      `INSERT INTO rule_profiles (profile_name, is_default, shift_start, shift_end, grace_slab_minutes, ot_multiplier, ot_rounding, short_hours_threshold, weekly_off_day, forfeiture_absent_threshold, standard_month_days)
+       VALUES (?, 1, '08:30', '16:30', 30, 1.5, 'minutes', 4.0, 'Sun', 2, '26')`,
+      ['Standard KKI Factory Rules (08:30 - 16:30 | OT after 4:30 PM)']
+    );
+  }
+
+  console.log('✅ Attendance & Payroll Database Initialized.');
+}
+
+module.exports = {
+  db,
+  execute,
+  batch,
+  initDatabase,
+};

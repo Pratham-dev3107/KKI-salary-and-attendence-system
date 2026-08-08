@@ -1,0 +1,279 @@
+const XLSX = require('xlsx');
+const WordExtractor = require('word-extractor');
+const mammoth = require('mammoth');
+const fs = require('fs');
+const path = require('path');
+
+const extractor = new WordExtractor();
+
+/**
+ * Clean whitespace and ditto marks
+ */
+function cleanVal(val) {
+  if (val === null || val === undefined) return '';
+  const str = String(val).trim();
+  if (str === '"' || str === '""' || str.replace(/"/g, '').trim() === '') {
+    return '"';
+  }
+  return str;
+}
+
+/**
+ * Normalize Date String "2026-07-01 Wed" -> { date: "2026-07-01", weekday: "Wed" }
+ */
+function parseDateCell(rawDate) {
+  if (!rawDate) return { date: '', weekday: '' };
+  const str = String(rawDate).trim();
+
+  // Match ISO date YYYY-MM-DD
+  const isoMatch = str.match(/(\d{4}-\d{2}-\d{2})\s*([A-Za-z]+)?/);
+  if (isoMatch) {
+    return {
+      date: isoMatch[1],
+      weekday: isoMatch[2] || getWeekdayFromISO(isoMatch[1]),
+    };
+  }
+
+  return { date: str, weekday: '' };
+}
+
+function getWeekdayFromISO(isoStr) {
+  const d = new Date(isoStr);
+  if (isNaN(d.getTime())) return '';
+  const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  return days[d.getDay()];
+}
+
+/**
+ * Parse Swipe Record string into normalized timestamps
+ * @param {string} rawSwipes 
+ */
+function parseSwipeRecord(rawSwipes) {
+  if (!rawSwipes) return { timestamps: [], isOdd: false, isEmpty: true };
+  
+  // Extract all HH:MM pattern timestamps
+  const matches = String(rawSwipes).match(/\b\d{1,2}:\d{2}\b/g) || [];
+  const timestamps = matches.filter(t => t !== '00:00').map(t => {
+    const parts = t.split(':');
+    const hh = parts[0].padStart(2, '0');
+    const mm = parts[1].padStart(2, '0');
+    return `${hh}:${mm}`;
+  });
+
+  const isEmpty = timestamps.length === 0;
+  const isOdd = timestamps.length % 2 !== 0;
+
+  return {
+    timestamps,
+    isOdd,
+    isEmpty,
+  };
+}
+
+/**
+ * Parse Excel Workbook (.xlsx, .xls)
+ * @param {string|Buffer} filePathOrBuffer 
+ */
+function parseExcelFile(filePathOrBuffer) {
+  const workbook = typeof filePathOrBuffer === 'string'
+    ? XLSX.readFile(filePathOrBuffer)
+    : XLSX.read(filePathOrBuffer, { type: 'buffer' });
+
+  const workersMap = new Map(); // staff_no -> worker object
+
+  workbook.SheetNames.forEach(sheetName => {
+    const sheet = workbook.Sheets[sheetName];
+    const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+
+    let currentDept = '';
+    let currentStaffNo = '';
+    let currentStaffName = '';
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      if (!row || row.length === 0) continue;
+
+      // Find Header row: contains "Department", "Staff No.", "Staff Name"
+      const rowStr = row.map(c => String(c)).join(' ');
+
+      if (rowStr.includes('Department') && rowStr.includes('Staff No.')) {
+        // Next row contains worker header info
+        const nextRow = rows[i + 1];
+        if (nextRow) {
+          currentDept = cleanVal(nextRow[1]) || 'WORKER';
+          currentStaffNo = cleanVal(nextRow[2]);
+          currentStaffName = cleanVal(nextRow[3]);
+
+          if (currentStaffNo && currentStaffNo !== '"') {
+            if (!workersMap.has(currentStaffNo)) {
+              workersMap.set(currentStaffNo, {
+                staff_no: currentStaffNo,
+                staff_name: currentStaffName,
+                department: currentDept,
+                records: [],
+              });
+            }
+          }
+        }
+        i++; // skip header data row
+        continue;
+      }
+
+      // Check if this row is a daily record row (has Date like 2026-07-01)
+      const dateCell = row.find(c => String(c).match(/\d{4}-\d{2}-\d{2}/));
+      if (dateCell && currentStaffNo) {
+        const { date, weekday } = parseDateCell(dateCell);
+
+        // Find Swipe Record cell (contains HH:MM or blank/ditto)
+        let swipeCell = '';
+        let machineTimeCell = '';
+
+        row.forEach(cell => {
+          const cStr = String(cell).trim();
+          if (cStr.match(/\d{1,2}:\d{2}/)) {
+            if (!swipeCell) swipeCell = cStr;
+            else machineTimeCell = cStr;
+          }
+        });
+
+        const workerObj = workersMap.get(currentStaffNo);
+        if (workerObj) {
+          workerObj.records.push({
+            staff_no: currentStaffNo,
+            date,
+            weekday,
+            swipe_record: swipeCell,
+            machine_work_time: machineTimeCell,
+          });
+        }
+      }
+    }
+  });
+
+  return Array.from(workersMap.values());
+}
+
+/**
+ * Extract raw text safely from Word document (.docx or .doc)
+ * @param {string} filePath 
+ */
+async function extractWordText(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  
+  if (ext === '.docx') {
+    try {
+      const result = await mammoth.extractRawText({ path: filePath });
+      if (result.value && result.value.trim()) return result.value;
+    } catch (err) {
+      console.warn('Mammoth failed for docx, attempting word-extractor fallback:', err.message);
+    }
+  }
+
+  // Fallback to WordExtractor (OLE2 format)
+  try {
+    const doc = await extractor.extract(filePath);
+    const body = doc.getBody();
+    if (body && body.trim()) return body;
+  } catch (err) {
+    console.warn('WordExtractor failed, attempting mammoth fallback:', err.message);
+    try {
+      const result = await mammoth.extractRawText({ path: filePath });
+      if (result.value) return result.value;
+    } catch (e) {
+      // Ignore
+    }
+  }
+
+  return '';
+}
+
+/**
+ * Parse Word Document (.docx, .doc)
+ * @param {string} filePath 
+ */
+async function parseWordFile(filePath) {
+  const text = await extractWordText(filePath);
+  if (!text) return [];
+
+  const rawLines = text.split('\n');
+  const lines = rawLines.map(l => l.trim()).filter(Boolean);
+  const workersMap = new Map();
+
+  let currentDept = 'WORKER';
+  let currentStaffNo = '';
+  let currentStaffName = '';
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    // Detect Header block: "Department", "Staff No.", "Staff Name"
+    if (line.includes('Department') && (line.includes('Staff No') || lines[i + 1]?.includes('Staff No'))) {
+      let j = i + 1;
+      while (j < lines.length && (lines[j] === '' || lines[j] === '"' || lines[j].includes('Staff'))) j++;
+
+      if (j < lines.length) {
+        // Try parsing line or sequential lines
+        const block = lines.slice(j, j + 5).join(' ');
+        const staffNoMatch = block.match(/\b\d{3,6}\b/);
+        if (staffNoMatch) {
+          currentStaffNo = staffNoMatch[0];
+          // Look for staff name nearby
+          const nameMatch = block.match(/([A-Z\s]{3,30})/);
+          currentStaffName = nameMatch ? nameMatch[1].trim() : `Worker ${currentStaffNo}`;
+        } else {
+          currentDept = lines[j] || 'WORKER';
+          currentStaffNo = lines[j + 1] || '';
+          currentStaffName = lines[j + 2] || '';
+        }
+
+        if (currentStaffNo && currentStaffNo !== '"' && !workersMap.has(currentStaffNo)) {
+          workersMap.set(currentStaffNo, {
+            staff_no: currentStaffNo,
+            staff_name: currentStaffName,
+            department: currentDept,
+            records: [],
+          });
+        }
+      }
+    }
+
+    // Match daily date line "2026-07-01 Wed" or similar ISO date
+    const dateMatch = line.match(/(\d{4}-\d{2}-\d{2})\s*([A-Za-z]+)?/);
+    if (dateMatch) {
+      const date = dateMatch[1];
+      const weekday = dateMatch[2] || getWeekdayFromISO(date);
+      const nextLine = lines[i + 1] || '';
+      const nextNextLine = lines[i + 2] || '';
+
+      let swipe_record = '';
+      let machine_work_time = '';
+
+      if (nextLine.match(/\d{1,2}:\d{2}/)) {
+        swipe_record = nextLine;
+        if (nextNextLine.match(/\d{1,2}:\d{2}/)) {
+          machine_work_time = nextNextLine;
+        }
+      }
+
+      if (currentStaffNo && workersMap.has(currentStaffNo)) {
+        workersMap.get(currentStaffNo).records.push({
+          staff_no: currentStaffNo,
+          date,
+          weekday,
+          swipe_record,
+          machine_work_time,
+        });
+      }
+    }
+  }
+
+  return Array.from(workersMap.values());
+}
+
+module.exports = {
+  parseExcelFile,
+  parseWordFile,
+  parseSwipeRecord,
+  parseDateCell,
+};
+
