@@ -1489,6 +1489,16 @@ if (fs.existsSync(distDir)) {
   });
 }
 
+// Global API Error Handler Middleware (Guarantees JSON response for API endpoints)
+app.use((err, req, res, next) => {
+  console.error('API Server Error:', err);
+  if (res.headersSent) return next(err);
+  res.status(err.status || 500).json({
+    success: false,
+    error: err.message || 'Internal Server Error'
+  });
+});
+
 // Start Unified Server
 const PORT = process.env.PORT || 5000;
 initDatabase().then(() => {

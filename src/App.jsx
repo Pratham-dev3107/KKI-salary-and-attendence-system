@@ -85,15 +85,23 @@ export default function App() {
     formData.append('file', file);
 
     try {
-      const res = await fetch('/api/upload', {
+      const response = await fetch('/api/upload', {
         method: 'POST',
         body: formData,
-      }).then(r => r.json());
+      });
 
-      if (res.success) {
-        setPreviewData(res);
+      const contentType = response.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) {
+        const res = await response.json();
+        if (res.success) {
+          setPreviewData(res);
+        } else {
+          alert('Upload Error: ' + (res.error || 'Failed to parse file.'));
+        }
       } else {
-        alert('Upload Error: ' + res.error);
+        const text = await response.text();
+        console.error('Non-JSON upload response:', text);
+        alert('Upload Error: Server returned an invalid response. Please check your document format.');
       }
     } catch (err) {
       alert('Upload failed: ' + err.message);
@@ -108,18 +116,24 @@ export default function App() {
     setLoading(true);
 
     try {
-      const res = await fetch('/api/upload/commit', {
+      const response = await fetch('/api/upload/commit', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ parsedData: previewData.parsedData }),
-      }).then(r => r.json());
+      });
 
-      if (res.success) {
-        setPreviewData(null);
-        await refreshData();
-        setActiveTab('workers');
+      const contentType = response.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) {
+        const res = await response.json();
+        if (res.success) {
+          setPreviewData(null);
+          await refreshData();
+          setActiveTab('workers');
+        } else {
+          alert('Commit error: ' + (res.error || 'Failed to save data.'));
+        }
       } else {
-        alert('Commit error: ' + res.error);
+        alert('Commit Error: Server returned an invalid response.');
       }
     } catch (err) {
       alert('Commit failed: ' + err.message);
