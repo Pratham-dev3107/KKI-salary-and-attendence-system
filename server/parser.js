@@ -209,21 +209,36 @@ async function parseWordFile(filePath) {
     // Detect Header block: "Department", "Staff No.", "Staff Name"
     if (line.includes('Department') && (line.includes('Staff No') || lines[i + 1]?.includes('Staff No'))) {
       let j = i + 1;
-      while (j < lines.length && (lines[j] === '' || lines[j] === '"' || lines[j].includes('Staff'))) j++;
+      while (
+        j < lines.length &&
+        (lines[j] === '' ||
+          lines[j] === '"' ||
+          lines[j].includes('Staff') ||
+          lines[j] === 'Department' ||
+          lines[j] === 'Date' ||
+          lines[j] === 'Swipe Record' ||
+          lines[j] === 'Work Time')
+      ) {
+        j++;
+      }
 
       if (j < lines.length) {
-        // Try parsing line or sequential lines
-        const block = lines.slice(j, j + 5).join(' ');
-        const staffNoMatch = block.match(/\b\d{3,6}\b/);
-        if (staffNoMatch) {
-          currentStaffNo = staffNoMatch[0];
-          // Look for staff name nearby
-          const nameMatch = block.match(/([A-Z\s]{3,30})/);
-          currentStaffName = nameMatch ? nameMatch[1].trim() : `Worker ${currentStaffNo}`;
+        const candidateDept = lines[j] || 'WORKER';
+        const candidateStaffNo = lines[j + 1] || '';
+        const candidateStaffName = lines[j + 2] || '';
+
+        if (candidateStaffNo && candidateStaffNo !== '"' && /^\d{1,6}$/.test(candidateStaffNo)) {
+          currentDept = candidateDept;
+          currentStaffNo = candidateStaffNo;
+          currentStaffName = candidateStaffName;
         } else {
-          currentDept = lines[j] || 'WORKER';
-          currentStaffNo = lines[j + 1] || '';
-          currentStaffName = lines[j + 2] || '';
+          const block = lines.slice(j, j + 5).join(' ');
+          const staffNoMatch = block.match(/\b\d{1,6}\b/);
+          if (staffNoMatch) {
+            currentStaffNo = staffNoMatch[0];
+            const nameMatch = block.match(/([A-Z\s]{3,30})/i);
+            currentStaffName = nameMatch ? nameMatch[1].trim() : `Worker ${currentStaffNo}`;
+          }
         }
 
         if (currentStaffNo && currentStaffNo !== '"' && !workersMap.has(currentStaffNo)) {
