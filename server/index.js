@@ -14,7 +14,8 @@ const { processUniversalAssistantPrompt } = require('./aiAssistantEngine');
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // Setup Multer for upload handling
 const uploadDir = path.join(__dirname, '../uploads');
@@ -407,7 +408,44 @@ app.post('/api/upload/commit', async (req, res) => {
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
+// 4.1 POST Clear Attendance Logs by Date Range or Month
+app.post('/api/attendance/clear-range', async (req, res) => {
+  try {
+    const { startDate, endDate, month, clearAll } = req.body;
+
+    let deleteWhere = '';
+    let params = [];
+
+    if (clearAll) {
+      deleteWhere = '1=1';
+    } else if (startDate && endDate) {
+      deleteWhere = 'date >= ? AND date <= ?';
+      params = [startDate, endDate];
+    } else if (month) {
+      // month formatted as 'YYYY-MM' (e.g. '2026-07')
+      deleteWhere = 'date LIKE ?';
+      params = [`${month}%`];
+    } else {
+      return res.status(400).json({ success: false, error: 'Please provide startDate & endDate or month string (YYYY-MM).' });
+    }
+
+    const countRes = await execute(`SELECT COUNT(*) as cnt FROM daily_attendance WHERE ${deleteWhere}`, params);
+    const deletedCount = countRes.rows[0]?.cnt || 0;
+
+    await execute(`DELETE FROM daily_attendance WHERE ${deleteWhere}`, params);
+    await execute(`DELETE FROM raw_punches WHERE ${deleteWhere}`, params);
+
+    res.json({
+      success: true,
+      message: `Cleared ${deletedCount} attendance records for the selected period.`,
+      deletedCount
+    });
+  } catch (err) {
+    console.error('Clear Attendance Error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
+
 
 // Helper: Recompute all daily attendance with current settings
 async function recomputeAllAttendance() {

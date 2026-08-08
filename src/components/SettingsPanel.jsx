@@ -12,6 +12,7 @@ import {
   Plus, 
   Sparkles, 
   Trash2, 
+  Calendar,
   CheckCircle2, 
   Zap,
   ToggleLeft,
@@ -82,6 +83,52 @@ export default function SettingsPanel({ settingsList = [], onSaveSettings, loadi
 
   const [toast, setToast] = useState('');
   const [submitting, setSubmitting] = useState(false);
+
+  // Clear Attendance Logs State
+  const [clearMonth, setClearMonth] = useState('');
+  const [clearStartDate, setClearStartDate] = useState('');
+  const [clearEndDate, setClearEndDate] = useState('');
+  const [clearLoading, setClearLoading] = useState(false);
+
+  const handleClearAttendanceLogs = async (mode) => {
+    let payload = {};
+    let confirmMsg = '';
+
+    if (mode === 'month') {
+      if (!clearMonth) return alert('Please select a month to clear.');
+      payload = { month: clearMonth };
+      confirmMsg = `Are you sure you want to delete ALL attendance records for month ${clearMonth}?`;
+    } else if (mode === 'range') {
+      if (!clearStartDate || !clearEndDate) return alert('Please select start and end dates.');
+      payload = { startDate: clearStartDate, endDate: clearEndDate };
+      confirmMsg = `Are you sure you want to delete attendance records from ${clearStartDate} to ${clearEndDate}?`;
+    } else if (mode === 'all') {
+      payload = { clearAll: true };
+      confirmMsg = `⚠️ WARNING: Are you sure you want to delete ALL attendance records in the database? This action CANNOT be undone!`;
+    }
+
+    if (!window.confirm(confirmMsg)) return;
+
+    setClearLoading(true);
+    try {
+      const res = await fetch('/api/attendance/clear-range', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }).then(r => r.json());
+
+      if (res.success) {
+        setToast(`Deleted ${res.deletedCount} attendance records successfully.`);
+        if (onSettingsUpdated) onSettingsUpdated();
+      } else {
+        alert('Clear failed: ' + res.error);
+      }
+    } catch (err) {
+      alert('Clear failed: ' + err.message);
+    } finally {
+      setClearLoading(false);
+    }
+  };
 
   useEffect(() => {
     if (settingsList && Array.isArray(settingsList)) {
@@ -464,6 +511,79 @@ export default function SettingsPanel({ settingsList = [], onSaveSettings, loadi
       )}
 
 
+
+      {/* ==================== CLEAR ATTENDANCE LOGS (MONTHLY RESET) ==================== */}
+      <div className="glass-card rounded-2xl p-6 border border-red-500/30 space-y-4 bg-gradient-to-br from-red-950/20 to-slate-900/90 shadow-xl">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center space-x-3">
+            <div className="w-10 h-10 rounded-xl bg-red-500/20 text-red-400 flex items-center justify-center border border-red-500/30">
+              <Trash2 className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="text-sm font-bold text-white font-display uppercase tracking-wider text-red-300">
+                Clear Attendance Logs (Monthly Reset)
+              </h3>
+              <p className="text-xs text-slate-400">
+                Clear attendance records for a specific month or date range before uploading a new month's export sheet.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
+          {/* Option A: By Month */}
+          <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-4 space-y-3">
+            <p className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+              <Calendar className="w-4 h-4 text-red-400" />
+              <span>Clear By Specific Month</span>
+            </p>
+            <input
+              type="month"
+              value={clearMonth}
+              onChange={(e) => setClearMonth(e.target.value)}
+              className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-red-500 font-mono"
+            />
+            <button
+              onClick={() => handleClearAttendanceLogs('month')}
+              disabled={clearLoading || !clearMonth}
+              className="w-full py-2 bg-red-600/80 hover:bg-red-600 disabled:opacity-40 text-white text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-1.5 shadow-md shadow-red-600/20"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span>{clearLoading ? 'Deleting Logs...' : 'Delete Selected Month Logs'}</span>
+            </button>
+          </div>
+
+          {/* Option B: By Date Range */}
+          <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-4 space-y-3">
+            <p className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+              <Calendar className="w-4 h-4 text-red-400" />
+              <span>Clear By Date Range</span>
+            </p>
+            <div className="grid grid-cols-2 gap-2">
+              <input
+                type="date"
+                value={clearStartDate}
+                onChange={(e) => setClearStartDate(e.target.value)}
+                className="w-full bg-slate-900 border border-slate-700 rounded-xl px-2.5 py-2 text-xs text-white focus:outline-none focus:border-red-500 font-mono"
+              />
+              <input
+                type="date"
+                value={clearEndDate}
+                onChange={(e) => setClearEndDate(e.target.value)}
+                className="w-full bg-slate-900 border border-slate-700 rounded-xl px-2.5 py-2 text-xs text-white focus:outline-none focus:border-red-500 font-mono"
+              />
+            </div>
+            <button
+              onClick={() => handleClearAttendanceLogs('range')}
+              disabled={clearLoading || !clearStartDate || !clearEndDate}
+              className="w-full py-2 bg-red-600/80 hover:bg-red-600 disabled:opacity-40 text-white text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-1.5 shadow-md shadow-red-600/20"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span>{clearLoading ? 'Deleting Logs...' : 'Delete Date Range Logs'}</span>
+            </button>
+          </div>
+        </div>
+      </div>
 
       {/* ==================== CUSTOM SALARY RULES LIST ==================== */}
       <div className="glass-card rounded-2xl p-6 border border-purple-500/30 space-y-4">
