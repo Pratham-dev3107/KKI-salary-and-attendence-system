@@ -408,6 +408,8 @@ app.post('/api/upload/commit', async (req, res) => {
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
+});
+
 // 4.1 POST Clear Attendance Logs by Date Range or Month
 app.post('/api/attendance/clear-range', async (req, res) => {
   try {
